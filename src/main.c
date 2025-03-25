@@ -20,7 +20,8 @@
 #define LIGHT_SERVICE_UUID       0x00FF
 #define LIGHT_STATE_UUID         0xFF01
 #define LIGHT_BRIGHTNESS_UUID    0xFF02
-#define LIGHT_FADE_UUID          0xFF03
+#define LIGHT_FADE_STATE_UUID    0xFF03
+#define LIGHT_FADE_UUID          0xFF04
 
 #define LED_GPIO                 GPIO_NUM_18
 #define LEDC_TIMER               LEDC_TIMER_0
@@ -58,10 +59,12 @@ static esp_ble_adv_params_t adv_params = {
 
 static uint8_t led_on = 0;
 static uint8_t brightness = 255;
-static uint16_t fade_time = 1000;
+static uint16_t fade_time = 100;
+static uint8_t fade_on = 0;
+static TaskHandle_t fade_task_handle = NULL; 
 
 static uint16_t service_handle;
-static uint16_t char_handles[3];
+static uint16_t char_handles[4];
 
 void apply_led_state() {
     if (!led_on) {
@@ -73,12 +76,37 @@ void apply_led_state() {
     }
 }
 
-void start_fade_effect() {
-    while (1) {
+void start_fade_effect(void *arg) {
+    while (fade_on) {
         ledc_set_fade_time_and_start(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL, brightness, fade_time, LEDC_FADE_WAIT_DONE);
         ledc_set_fade_time_and_start(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL, 0, fade_time, LEDC_FADE_WAIT_DONE);
     }
+
+    led_on = 1;
+    apply_led_state();
+    
+    ESP_LOGI(GATTS_TAG, "Fade task stopping...");
+    fade_task_handle = NULL;
+    vTaskDelete(NULL);
 }
+
+void start_fade() {
+    if (fade_task_handle == NULL) {
+        fade_on = 1;
+        xTaskCreate(start_fade_effect, "fade_task", 2048, NULL, 5, &fade_task_handle);
+        ESP_LOGI(GATTS_TAG, "Fade task started");
+    } else {
+        ESP_LOGI(GATTS_TAG, "Fade task already running");
+    }
+}
+
+void stop_fade() {
+    if (fade_task_handle != NULL) {
+        fade_on = 0;
+        ESP_LOGI(GATTS_TAG, "Requested fade stop");
+    }
+}
+
 
 void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
     if (event == ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT) {
@@ -117,15 +145,21 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp
 
             char_uuid.uuid.uuid16 = LIGHT_BRIGHTNESS_UUID;
             esp_ble_gatts_add_char(service_handle, &char_uuid,
-                                   ESP_GATT_PERM_WRITE,
+                                   ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
                                    ESP_GATT_CHAR_PROP_BIT_WRITE,
                                    NULL, NULL);
 
+            char_uuid.uuid.uuid16 = LIGHT_FADE_STATE_UUID;
+            esp_ble_gatts_add_char(service_handle, &char_uuid,
+                                    ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+                                    ESP_GATT_CHAR_PROP_BIT_WRITE,
+                                    NULL, NULL);
+
             char_uuid.uuid.uuid16 = LIGHT_FADE_UUID;
             esp_ble_gatts_add_char(service_handle, &char_uuid,
-                                   ESP_GATT_PERM_WRITE,
-                                   ESP_GATT_CHAR_PROP_BIT_WRITE,
-                                   NULL, NULL);
+                                    ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+                                    ESP_GATT_CHAR_PROP_BIT_WRITE,
+                                    NULL, NULL);
             break;
         }
         case ESP_GATTS_ADD_CHAR_EVT: {
@@ -159,7 +193,6 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp
             ESP_LOGI("BLE_LIGHT", "Write event, handle: %d, value_len: %d", param->write.handle, param->write.len);
         
             if (!param->write.is_prep) {
-                // On vérifie que la valeur envoyée est de taille 1 (par exemple un uint8_t)
                 if (param->write.len == 1) {
                     uint16_t handle = param->write.handle;
                     uint8_t value = param->write.value[0];
@@ -167,14 +200,23 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp
         
                     if (handle == char_handles[0]) {
                         led_on = value;
-                        ESP_LOGI(GATTS_TAG, "NEW VALUE %d", value);
                         apply_led_state();
+                        ESP_LOGI(GATTS_TAG, "LIGHT IS SET ON %d", led_on);
                     } else if (handle == char_handles[1]) {
                         brightness = value;
                         apply_led_state();
+                        ESP_LOGI(GATTS_TAG, "LIGHT BRIGHTNESS IS SET ON %d", brightness);
                     } else if (handle == char_handles[2]) {
+                        if (value) {
+                            start_fade();
+                            ESP_LOGI(GATTS_TAG, "LIGHT FADE START");
+                        } else {
+                            stop_fade();
+                            ESP_LOGI(GATTS_TAG, "LIGHT FADE STOP");
+                        }
+                    } else if (handle == char_handles[3]) {
                         fade_time = value * 10;
-                        xTaskCreate((TaskFunction_t)start_fade_effect, "fade_task", 2048, NULL, 5, NULL);
+                        ESP_LOGI(GATTS_TAG, "LIGHT FADE SET ON %d", fade_time);
                     }
                     esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
         
@@ -190,13 +232,24 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp
         }
         case ESP_GATTS_READ_EVT: {
             ESP_LOGI(GATTS_TAG, "GATT_READ_EVT, conn_id %" PRIu16 ", trans_id %" PRIu32 ", handle %" PRIu16, param->read.conn_id, param->read.trans_id, param->read.handle);
+            
+            uint16_t handle = param->read.handle;
 
             esp_gatt_rsp_t rsp;
             memset(&rsp, 0, sizeof(esp_gatt_rsp_t));
-            
-            rsp.attr_value.handle = param->read.handle;
+
+            rsp.attr_value.handle = handle;
             rsp.attr_value.len = 1;
-            rsp.attr_value.value[0] = led_on;
+
+            if (handle == char_handles[0]) {
+                rsp.attr_value.value[0] = led_on;
+            } else if (handle == char_handles[1]) {
+                rsp.attr_value.value[0] = brightness;
+            } else if (handle == char_handles[2]) {
+                rsp.attr_value.value[0] = fade_on;
+            } else if (handle == char_handles[3]) {
+                rsp.attr_value.value[0] = fade_time;
+            }
             
             esp_ble_gatts_send_response(gatts_if, param->read.conn_id, param->read.trans_id, ESP_GATT_OK, &rsp);
             break;
@@ -249,7 +302,7 @@ void app_main(void) {
     esp_ble_gatts_app_register(0);
 
     while (1) {
-        ESP_LOGI("BLE_LIGHT", "Alive...");
+        ESP_LOGI(GATTS_TAG, "Alive...");
         vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 }
