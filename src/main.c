@@ -23,6 +23,7 @@
 #define LIGHT_FADE_STATE_UUID    0xFF03
 #define LIGHT_FADE_UUID          0xFF04
 
+#define CHAR_COUNT 4
 #define LED_GPIO                 GPIO_NUM_18
 #define LEDC_TIMER               LEDC_TIMER_0
 #define LEDC_CHANNEL             LEDC_CHANNEL_0
@@ -59,12 +60,14 @@ static esp_ble_adv_params_t adv_params = {
 
 static uint8_t led_on = 0;
 static uint8_t brightness = 255;
-static uint16_t fade_time = 100;
+static uint16_t fade_time = 500;
 static uint8_t fade_on = 0;
 static TaskHandle_t fade_task_handle = NULL; 
 
 static uint16_t service_handle;
-static uint16_t char_handles[4];
+static uint16_t char_handles[CHAR_COUNT];
+static esp_bt_uuid_t char_uuids[CHAR_COUNT];
+static int char_add_index = 0;
 
 void apply_led_state() {
     if (!led_on) {
@@ -109,9 +112,13 @@ void stop_fade() {
 
 
 void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
-    if (event == ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT) {
-        esp_ble_gap_start_advertising(&adv_params);
-    }
+    // if (char_add_index == CHAR_COUNT && event == ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT) {
+    //     ESP_LOGI(GATTS_TAG, "All characteristics added, starting advertising");
+    //     esp_ble_gap_start_advertising(&adv_params);
+    // } else if (event == ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT) {
+    //     esp_ble_gap_config_adv_data(&adv_data);
+    //     ESP_LOGI(GATTS_TAG, "Resend GAP event %d", char_add_index);
+    // }
 }
 
 void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param) {
@@ -127,44 +134,45 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp
                 .id.uuid.uuid.uuid16 = LIGHT_SERVICE_UUID
             };
 
-            esp_ble_gatts_create_service(gatts_if, &service_id, 8);
+            esp_ble_gatts_create_service(gatts_if, &service_id, (CHAR_COUNT * 2) + 4);
             break;
         }
         case ESP_GATTS_CREATE_EVT: {
             service_handle = param->create.service_handle;
             esp_ble_gatts_start_service(service_handle);
 
-            esp_bt_uuid_t char_uuid;
-
-            char_uuid.len = ESP_UUID_LEN_16;
-            char_uuid.uuid.uuid16 = LIGHT_STATE_UUID;
-            esp_ble_gatts_add_char(service_handle, &char_uuid,
-                                   ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-                                   ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_WRITE,
-                                   NULL, NULL);
-
-            char_uuid.uuid.uuid16 = LIGHT_BRIGHTNESS_UUID;
-            esp_ble_gatts_add_char(service_handle, &char_uuid,
-                                   ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-                                   ESP_GATT_CHAR_PROP_BIT_WRITE,
-                                   NULL, NULL);
-
-            char_uuid.uuid.uuid16 = LIGHT_FADE_STATE_UUID;
-            esp_ble_gatts_add_char(service_handle, &char_uuid,
-                                    ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-                                    ESP_GATT_CHAR_PROP_BIT_WRITE,
-                                    NULL, NULL);
-
-            char_uuid.uuid.uuid16 = LIGHT_FADE_UUID;
-            esp_ble_gatts_add_char(service_handle, &char_uuid,
-                                    ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-                                    ESP_GATT_CHAR_PROP_BIT_WRITE,
-                                    NULL, NULL);
+            char_uuids[0].len = ESP_UUID_LEN_16;
+            char_uuids[0].uuid.uuid16 = LIGHT_STATE_UUID;
+            
+            char_uuids[1].len = ESP_UUID_LEN_16;
+            char_uuids[1].uuid.uuid16 = LIGHT_BRIGHTNESS_UUID;
+            
+            char_uuids[2].len = ESP_UUID_LEN_16;
+            char_uuids[2].uuid.uuid16 = LIGHT_FADE_STATE_UUID;
+            
+            char_uuids[3].len = ESP_UUID_LEN_16;
+            char_uuids[3].uuid.uuid16 = LIGHT_FADE_UUID;
+            
+            char_add_index = 0;
+            esp_ble_gatts_add_char(service_handle, &char_uuids[char_add_index], ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE, ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_WRITE, NULL, NULL);
+            ESP_LOGI(GATTS_TAG, "Adding characteristic %d with UUID: 0x%04X", char_add_index, char_uuids[char_add_index].uuid.uuid16);
             break;
         }
         case ESP_GATTS_ADD_CHAR_EVT: {
-            static int char_idx = 0;
-            char_handles[char_idx++] = param->add_char.attr_handle;
+            char_handles[char_add_index] = param->add_char.attr_handle;
+            char_add_index++;
+            
+            if (char_add_index < CHAR_COUNT) {
+                esp_err_t ret = esp_ble_gatts_add_char(service_handle, &char_uuids[char_add_index], ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE, ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_WRITE, NULL, NULL);
+                if (ret != ESP_OK) {
+                    ESP_LOGE(GATTS_TAG, "Failed to add char FF04: %s", esp_err_to_name(ret));
+                } else {
+                    ESP_LOGI(GATTS_TAG, "Adding characteristic %d with UUID: 0x%04X", char_add_index, char_uuids[char_add_index].uuid.uuid16);
+                }
+            } else {
+                ESP_LOGI(GATTS_TAG, "All characteristics added, starting advertising");
+                esp_ble_gap_start_advertising(&adv_params);
+            }
             break;
         }
         case ESP_GATTS_CONNECT_EVT: {
@@ -215,7 +223,7 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp
                             ESP_LOGI(GATTS_TAG, "LIGHT FADE STOP");
                         }
                     } else if (handle == char_handles[3]) {
-                        fade_time = value * 10;
+                        fade_time = value;
                         ESP_LOGI(GATTS_TAG, "LIGHT FADE SET ON %d", fade_time);
                     }
                     esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
@@ -257,7 +265,9 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp
         case ESP_GATTS_DISCONNECT_EVT: {
             ESP_LOGI(GATTS_TAG, "Disconnected, remote "ESP_BD_ADDR_STR", reason 0x%02x",
             ESP_BD_ADDR_HEX(param->disconnect.remote_bda), param->disconnect.reason);
-            esp_ble_gap_start_advertising(&adv_params);
+            if (char_add_index == CHAR_COUNT) {
+                esp_ble_gap_start_advertising(&adv_params);
+            }
             break;
         }
         default:
