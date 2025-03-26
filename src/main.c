@@ -60,7 +60,7 @@ static esp_ble_adv_params_t adv_params = {
 
 static uint8_t led_on = 0;
 static uint8_t brightness = 255;
-static uint16_t fade_time = 500;
+static uint16_t fade_time = 255;
 static uint8_t fade_on = 0;
 static TaskHandle_t fade_task_handle = NULL; 
 
@@ -198,24 +198,23 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp
             break;
         }
         case ESP_GATTS_WRITE_EVT: {
-            ESP_LOGI("BLE_LIGHT", "Write event, handle: %d, value_len: %d", param->write.handle, param->write.len);
+            ESP_LOGI(GATTS_TAG, "Write event, handle: %d, value_len: %d", param->write.handle, param->write.len);
         
             if (!param->write.is_prep) {
                 if (param->write.len == 1) {
                     uint16_t handle = param->write.handle;
-                    uint8_t value = param->write.value[0];
-                    ESP_LOGI("BLE_LIGHT", "New value received: %d", value);
+                    ESP_LOGI(GATTS_TAG, "New value received: %d", param->write.value[0]);
         
                     if (handle == char_handles[0]) {
-                        led_on = value;
+                        led_on = param->write.value[0];
                         apply_led_state();
                         ESP_LOGI(GATTS_TAG, "LIGHT IS SET ON %d", led_on);
                     } else if (handle == char_handles[1]) {
-                        brightness = value;
+                        brightness = param->write.value[0];
                         apply_led_state();
                         ESP_LOGI(GATTS_TAG, "LIGHT BRIGHTNESS IS SET ON %d", brightness);
                     } else if (handle == char_handles[2]) {
-                        if (value) {
+                        if (param->write.value[0]) {
                             start_fade();
                             ESP_LOGI(GATTS_TAG, "LIGHT FADE START");
                         } else {
@@ -223,17 +222,17 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp
                             ESP_LOGI(GATTS_TAG, "LIGHT FADE STOP");
                         }
                     } else if (handle == char_handles[3]) {
-                        fade_time = value;
+                        fade_time = param->write.value[0] * 10;
                         ESP_LOGI(GATTS_TAG, "LIGHT FADE SET ON %d", fade_time);
                     }
                     esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
         
                 } else {
-                    ESP_LOGW("BLE_LIGHT", "Invalid value length: %d", param->write.len);
+                    ESP_LOGW(GATTS_TAG, "Invalid value length: %d", param->write.len);
                     esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_INVALID_ATTR_LEN, NULL);
                 }
             } else {
-                ESP_LOGW("BLE_LIGHT", "Prepare write not handled");
+                ESP_LOGW(GATTS_TAG, "Prepare write not handled");
                 esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_WRITE_NOT_PERMIT, NULL);
             }
             break;
